@@ -68,12 +68,25 @@ class _UnaryOp:
 
 # ── Tokenizer ──────────────────────────────────────────────────────────────────
 
+_QUOTED_SHEET = r"'(?:[^']|'')*'"
+_UNQUOTED_SHEET = r"[^\s,;(){}+\-*/^=<>&%!]+"
+_SHEET_PREFIX = rf"(?:(?:{_QUOTED_SHEET}|{_UNQUOTED_SHEET})!)"
+_CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
+_COLUMN_REF = r"\$?[A-Za-z]{1,3}"
+_ROW_REF = r"\$?\d+"
+_AREA_REF = (
+    rf"(?:{_CELL_REF}(?::{_CELL_REF})?"
+    rf"|{_COLUMN_REF}:{_COLUMN_REF}"
+    rf"|{_ROW_REF}:{_ROW_REF})"
+)
+_REF_RE = rf"(?:{_SHEET_PREFIX})?{_AREA_REF}"
+
 _PATTERNS = [
     ("NUMBER", r"\d+(\.\d*)?([eE][+-]?\d+)?"),
     ("STRING", r'"(?:[^"]|"")*"'),
     ("BOOL",   r"\b(?:TRUE|FALSE)\b"),
-    ("REF",    r"\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?"),   # A1, $B$2, A1:C3
-    ("NAME",   r"[A-Za-z_][A-Za-z0-9_.]*"),                 # function / named range
+    ("REF",    _REF_RE),                                     # A1, Sheet1!A1, 'Book'!A:E
+    ("NAME",   r"[^\W\d][\w.]*"),                            # function / named range
     ("OP",     r"<=|>=|<>|[+\-*/^=<>&%]"),
     ("LPAREN", r"\("),
     ("RPAREN", r"\)"),
