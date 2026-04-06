@@ -29,6 +29,12 @@ G = parse_formula("=SUM(A1, B1*2)")
 | `name`    | str  | FunctionCall | function name (e.g. `"SUM"`) |
 | `op`      | str  | BinaryOp, UnaryOp | operator symbol (e.g. `"*"`, `"-"`) |
 | `ref`     | str  | Reference | cell or range string (e.g. `"$A2"`, `"A1:B3"`) |
+| `reference_class` | str | Reference | `cell`, `cell_range`, `column_range`, `row_range`, or `named_range` |
+| `reference_scope` | str | Reference | `current_sheet`, `other_sheet`, or `external_workbook` |
+| `sheet_name` | str or null | Reference | parsed sheet name, if present |
+| `workbook_name` | str or null | Reference | parsed workbook file name, if present |
+| `workbook_path` | str or null | Reference | parsed external workbook path, if present |
+| `reference_parts` | dict | Reference | parsed row/column/cell coordinates for the ref |
 | `value`   | any  | Number, Text, Bool | literal value |
 
 **Edges** — directed from parent → child.
@@ -68,6 +74,9 @@ edges:
 - Binary operators: `+ - * / ^ & = <> < > <= >=`
 - Unary operators: `+ -`
 - Cell references: `A1`, `$A2`, `$A$2`, `A1:B3`, `$M$2:$Q$200`
+- Whole-column and whole-row references: `A:E`, `$A:$E`, `1:10`
+- Sheet-qualified references, including quoted sheet names and Cyrillic names
+- External workbook references, including full paths like `'C:\path\[Book.xlsx]Sheet1'!A1`
 - Named ranges
 - String literals: `"text"`
 - Numbers: integers, decimals, scientific notation

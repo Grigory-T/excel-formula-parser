@@ -20,6 +20,9 @@ Nodes  – one per AST node, keyed by UUIDv4.
            name       str    function name          (FunctionCall)
            op         str    operator symbol        (BinaryOp, UnaryOp)
            ref        str    cell / range string    (Reference)
+           reference_class  str   parsed Excel reference kind (Reference)
+           reference_scope  str   current_sheet | other_sheet |
+                                  external_workbook           (Reference)
            value      any    literal value          (Number, Text, Bool)
 
 Edges  – directed from parent → child.
@@ -113,6 +116,173 @@ def _tokenize(formula: str) -> list[tuple[str, str]]:
             tokens.append((m.lastgroup, m.group()))
         pos = m.end()
     return tokens
+
+# ── Reference parser ───────────────────────────────────────────────────────────
+
+_CELL_PART_RE = re.compile(r"^(?P<abs_col>\$?)(?P<col>[A-Za-z]{1,3})(?P<abs_row>\$?)(?P<row>\d+)$")
+_COLUMN_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<col>[A-Za-z]{1,3})$")
+_ROW_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<row>\d+)$")
+
+
+def _col_to_index(col: str) -> int:
+    value = 0
+    for char in col.upper():
+        value = value * 26 + (ord(char) - ord("A") + 1)
+    return value
+
+
+def _split_ref_prefix(ref: str) -> tuple[str | None, str]:
+    in_quotes = False
+    i = 0
+    while i < len(ref):
+        char = ref[i]
+        if char == "'":
+            if in_quotes and i + 1 < len(ref) and ref[i + 1] == "'":
+                i += 2
+                continue
+            in_quotes = not in_quotes
+        elif char == "!" and not in_quotes:
+            return ref[:i], ref[i + 1:]
+        i += 1
+    return None, ref
+
+
+def _unquote_sheet_prefix(prefix: str) -> tuple[str, bool]:
+    if len(prefix) >= 2 and prefix[0] == "'" and prefix[-1] == "'":
+        return prefix[1:-1].replace("''", "'"), True
+    return prefix, False
+
+
+def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
+    if prefix is None:
+        return {
+            "reference_scope": "current_sheet",
+            "sheet_name": None,
+            "sheet_quoted": False,
+            "workbook_name": None,
+            "workbook_path": None,
+            "has_sheet": False,
+            "has_workbook": False,
+            "is_external": False,
+        }
+
+    raw_prefix, quoted = _unquote_sheet_prefix(prefix)
+    workbook_name = None
+    workbook_path = None
+    sheet_name = raw_prefix
+
+    if "[" in raw_prefix and "]" in raw_prefix:
+        open_idx = raw_prefix.find("[")
+        close_idx = raw_prefix.find("]", open_idx + 1)
+        if close_idx != -1:
+            workbook_path = raw_prefix[:open_idx] or None
+            workbook_name = raw_prefix[open_idx + 1:close_idx] or None
+            sheet_name = raw_prefix[close_idx + 1:] or None
+
+    return {
+        "reference_scope": "external_workbook" if workbook_name else "other_sheet",
+        "sheet_name": sheet_name,
+        "sheet_quoted": quoted,
+        "workbook_name": workbook_name,
+        "workbook_path": workbook_path,
+        "has_sheet": True,
+        "has_workbook": workbook_name is not None,
+        "is_external": workbook_name is not None,
+    }
+
+
+def _parse_ref_part(part: str) -> dict[str, Any] | None:
+    match = _CELL_PART_RE.match(part)
+    if match:
+        col = match.group("col").upper()
+        row = int(match.group("row"))
+        return {
+            "part_kind": "cell",
+            "text": part,
+            "column": col,
+            "column_index": _col_to_index(col),
+            "row": row,
+            "abs_column": bool(match.group("abs_col")),
+            "abs_row": bool(match.group("abs_row")),
+        }
+
+    match = _COLUMN_PART_RE.match(part)
+    if match:
+        col = match.group("col").upper()
+        return {
+            "part_kind": "column",
+            "text": part,
+            "column": col,
+            "column_index": _col_to_index(col),
+            "abs_column": bool(match.group("abs")),
+        }
+
+    match = _ROW_PART_RE.match(part)
+    if match:
+        return {
+            "part_kind": "row",
+            "text": part,
+            "row": int(match.group("row")),
+            "abs_row": bool(match.group("abs")),
+        }
+
+    return None
+
+
+def parse_reference(ref: str) -> dict[str, Any]:
+    """
+    Parse an Excel reference into structured metadata.
+
+    Supported forms include:
+    - single cells: A1, $B$2
+    - cell ranges: A1:C3, Sheet1!$A$1:$B$2
+    - whole columns: C:C, $A:$E
+    - whole rows: 1:10
+    - quoted/unquoted sheet names
+    - external workbook references such as '[Book.xlsx]Sheet1'!A1 or
+      'C:\\path\\[Book.xlsx]Sheet1'!A1
+
+    Named ranges are returned as class "named_range".
+    """
+    prefix, area = _split_ref_prefix(ref)
+    sheet_meta = _parse_sheet_prefix(prefix)
+
+    if ":" in area:
+        start_text, end_text = area.split(":", 1)
+        start = _parse_ref_part(start_text)
+        end = _parse_ref_part(end_text)
+        if start and end:
+            if start["part_kind"] == end["part_kind"] == "cell":
+                ref_class = "cell_range"
+            elif start["part_kind"] == end["part_kind"] == "column":
+                ref_class = "column_range"
+            elif start["part_kind"] == end["part_kind"] == "row":
+                ref_class = "row_range"
+            else:
+                ref_class = "mixed_range"
+            return {
+                "reference_class": ref_class,
+                "normalized_ref": ref,
+                "reference_parts": {"start": start, "end": end},
+                **sheet_meta,
+            }
+    else:
+        part = _parse_ref_part(area)
+        if part and part["part_kind"] == "cell":
+            return {
+                "reference_class": "cell",
+                "normalized_ref": ref,
+                "reference_parts": {"value": part},
+                **sheet_meta,
+            }
+
+    return {
+        "reference_class": "named_range",
+        "normalized_ref": ref,
+        "reference_parts": {"value": {"part_kind": "name", "text": area}},
+        "reference_scope": "current_sheet" if prefix is None else sheet_meta["reference_scope"],
+        **sheet_meta,
+    }
 
 # ── Parser (recursive descent) ─────────────────────────────────────────────────
 
@@ -251,6 +421,7 @@ def _add_node(G: nx.DiGraph, node, parent_id=None, arg_index=None) -> str:
                      label=f'UnaryOp("{node.op}")')
     elif isinstance(node, _Reference):
         attrs.update(type="Reference", ref=node.ref,
+                     **parse_reference(node.ref),
                      label=f'Reference("{node.ref}")')
     elif isinstance(node, _Number):
         attrs.update(type="Number", value=node.value,
