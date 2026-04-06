@@ -19,11 +19,11 @@ G = parse_formula("=SUM(A1, B1*2)")
 
 ## Graph structure
 
-**Nodes** — one per AST node, root is always node `0`.
+**Nodes** — one per AST node, keyed by UUIDv4.
 
 | Attribute | Type | Always present | Description |
 |-----------|------|----------------|-------------|
-| `id`      | int  | yes | unique node id |
+| `id`      | str  | yes | unique UUIDv4 node id |
 | `type`    | str  | yes | `FunctionCall`, `BinaryOp`, `UnaryOp`, `Reference`, `Number`, `Text`, `Bool` |
 | `label`   | str  | yes | human-readable display string |
 | `name`    | str  | FunctionCall | function name (e.g. `"SUM"`) |
@@ -37,23 +37,29 @@ G = parse_formula("=SUM(A1, B1*2)")
 |-------------|------|-------------|
 | `arg_index` | int  | 0-based position among siblings |
 
+**Graph** — each parsed formula is a tree, so there is always exactly one root.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `root_id` | str  | UUIDv4 of the root node |
+
 ## Example
 
 ```
 =SUM(A1, B1*2)
 
 nodes:
-  0  FunctionCall  name="SUM"
-  1  Reference     ref="A1"
-  2  BinaryOp      op="*"
-  3  Reference     ref="B1"
-  4  Number        value=2
+  550e8400-e29b-41d4-a716-446655440000  FunctionCall  name="SUM"
+  1a4f6c08-2e8b-4103-b9c9-4e7a3afc8f91  Reference     ref="A1"
+  28cf18e8-98b7-40ad-8410-5d279d40f247  BinaryOp      op="*"
+  2c8f9ce1-6c5d-4897-99dc-55d65d0bf0fd  Reference     ref="B1"
+  9da8fd2a-1ed3-4236-b3fc-c5ec9f0a6ea6  Number        value=2
 
 edges:
-  0 → 1  arg_index=0
-  0 → 2  arg_index=1
-  2 → 3  arg_index=0
-  2 → 4  arg_index=1
+  550e8400-e29b-41d4-a716-446655440000 → 1a4f6c08-2e8b-4103-b9c9-4e7a3afc8f91  arg_index=0
+  550e8400-e29b-41d4-a716-446655440000 → 28cf18e8-98b7-40ad-8410-5d279d40f247  arg_index=1
+  28cf18e8-98b7-40ad-8410-5d279d40f247 → 2c8f9ce1-6c5d-4897-99dc-55d65d0bf0fd  arg_index=0
+  28cf18e8-98b7-40ad-8410-5d279d40f247 → 9da8fd2a-1ed3-4236-b3fc-c5ec9f0a6ea6  arg_index=1
 ```
 
 ## Supported syntax

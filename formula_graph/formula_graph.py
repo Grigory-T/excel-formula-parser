@@ -10,9 +10,9 @@ Usage
 
 Graph structure
 ---------------
-Nodes  – one per AST node, keyed by integer id (root = 0).
+Nodes  – one per AST node, keyed by UUIDv4.
          Every node carries:
-           id         int    unique node id
+           id         str    unique UUIDv4 node id
            type       str    FunctionCall | BinaryOp | UnaryOp |
                              Reference | Number | Text | Bool
            label      str    human-readable display label
@@ -28,6 +28,8 @@ Edges  – directed from parent → child.
 """
 
 import re
+from uuid import uuid4
+
 import networkx as nx
 from dataclasses import dataclass, field
 from typing import Any
@@ -233,9 +235,8 @@ def _children(node) -> list:
     if isinstance(node, _UnaryOp):     return [node.expr]
     return []
 
-def _add_node(G: nx.DiGraph, node, counter: list, parent_id=None, arg_index=None) -> int:
-    nid = counter[0]
-    counter[0] += 1
+def _add_node(G: nx.DiGraph, node, parent_id=None, arg_index=None) -> str:
+    nid = str(uuid4())
 
     attrs = {"id": nid}
 
@@ -267,7 +268,7 @@ def _add_node(G: nx.DiGraph, node, counter: list, parent_id=None, arg_index=None
         G.add_edge(parent_id, nid, arg_index=arg_index)
 
     for i, child in enumerate(_children(node)):
-        _add_node(G, child, counter, parent_id=nid, arg_index=i)
+        _add_node(G, child, parent_id=nid, arg_index=i)
 
     return nid
 
@@ -285,13 +286,14 @@ def parse_formula(formula: str) -> nx.DiGraph:
     Returns
     -------
     nx.DiGraph
-        Directed graph where node 0 is the root.
+        Directed tree with exactly one root node.
         Node attributes: id, type, label, and type-specific fields
         (name / op / ref / value).
         Edge attributes: arg_index (0-based child position).
+        Graph attribute: root_id (UUIDv4 of the root node).
     """
     tokens = _tokenize(formula)
     ast = _Parser(tokens).parse()
     G = nx.DiGraph()
-    _add_node(G, ast, counter=[0])
+    G.graph["root_id"] = _add_node(G, ast)
     return G
