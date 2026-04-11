@@ -56,6 +56,10 @@ class _Reference:
     ref: str
 
 @dataclass
+class _ArrayConstant:
+    rows: list[list[Any]]
+
+@dataclass
 class _FunctionCall:
     name: str
     args: list = field(default_factory=list)
@@ -79,12 +83,15 @@ _SHEET_PREFIX = rf"(?:(?:{_QUOTED_SHEET}|{_UNQUOTED_SHEET})!)"
 _CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
 _COLUMN_REF = r"\$?[A-Za-z]{1,3}"
 _ROW_REF = r"\$?\d+"
+_STRUCTURED_REF = r"(?:[^\W\d][\w.]*)?(?:\[(?:[^\[\]]+|\[[^\[\]]+\])+\])+"
 _AREA_REF = (
     rf"(?:{_CELL_REF}(?::{_CELL_REF})?"
     rf"|{_COLUMN_REF}:{_COLUMN_REF}"
     rf"|{_ROW_REF}:{_ROW_REF})"
 )
-_REF_RE = rf"(?:{_SHEET_PREFIX})?{_AREA_REF}"
+_A1_REF_RE = rf"(?:{_SHEET_PREFIX})?{_AREA_REF}#?"
+_TABLE_REF_RE = rf"(?:{_SHEET_PREFIX})?{_STRUCTURED_REF}#?"
+_REF_RE = rf"(?:{_A1_REF_RE}|{_TABLE_REF_RE})"
 
 _PATTERNS = [
     ("NUMBER", r"\d+(\.\d*)?([eE][+-]?\d+)?"),
@@ -92,7 +99,7 @@ _PATTERNS = [
     ("BOOL",   r"\b(?:TRUE|FALSE)\b"),
     ("REF",    _REF_RE),                                     # A1, Sheet1!A1, 'Book'!A:E
     ("NAME",   r"[^\W\d][\w.]*"),                            # function / named range
-    ("OP",     r"<=|>=|<>|[+\-*/^=<>&%]"),
+    ("OP",     r"<=|>=|<>|[@+\-*/^=<>&%]"),
     ("LPAREN", r"\("),
     ("RPAREN", r"\)"),
     ("COMMA",  r"[,;]"),
@@ -117,11 +124,27 @@ def _tokenize(formula: str) -> list[tuple[str, str]]:
         pos = m.end()
     return tokens
 
+
+def _split_formula_wrapper(formula: str) -> tuple[str, dict[str, Any]]:
+    src = formula.strip()
+    meta = {
+        "formula_type": "normal_formula",
+        "formula_wrapper": None,
+    }
+    if src.startswith("{=") and src.endswith("}"):
+        meta["formula_type"] = "array_formula"
+        meta["formula_wrapper"] = "array"
+        return src[2:-1], meta
+    if src.startswith("="):
+        return src[1:], meta
+    return src, meta
+
 # ── Reference parser ───────────────────────────────────────────────────────────
 
 _CELL_PART_RE = re.compile(r"^(?P<abs_col>\$?)(?P<col>[A-Za-z]{1,3})(?P<abs_row>\$?)(?P<row>\d+)$")
 _COLUMN_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<col>[A-Za-z]{1,3})$")
 _ROW_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<row>\d+)$")
+_TABLE_REF_RE_FULL = re.compile(r"^(?P<table>[^\W\d][\w.]*)?(?P<selectors>(?:\[(?:[^\[\]]+|\[[^\[\]]+\])+\])+)$")
 
 
 def _col_to_index(col: str) -> int:
@@ -147,6 +170,109 @@ def _split_ref_prefix(ref: str) -> tuple[str | None, str]:
     return None, ref
 
 
+def _split_top_level(ref: str, separators: set[str]) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    quote = False
+    bracket_depth = 0
+    paren_depth = 0
+    brace_depth = 0
+    i = 0
+    while i < len(ref):
+        char = ref[i]
+        if char == "'":
+            if quote and i + 1 < len(ref) and ref[i + 1] == "'":
+                i += 2
+                continue
+            quote = not quote
+        elif not quote:
+            if char == "[":
+                bracket_depth += 1
+            elif char == "]" and bracket_depth > 0:
+                bracket_depth -= 1
+            elif char == "(":
+                paren_depth += 1
+            elif char == ")" and paren_depth > 0:
+                paren_depth -= 1
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}" and brace_depth > 0:
+                brace_depth -= 1
+            elif (
+                char in separators
+                and bracket_depth == 0
+                and paren_depth == 0
+                and brace_depth == 0
+            ):
+                parts.append(ref[start:i].strip())
+                start = i + 1
+        i += 1
+    parts.append(ref[start:].strip())
+    return [part for part in parts if part]
+
+
+def _split_top_level_intersection(ref: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = False
+    bracket_depth = 0
+    paren_depth = 0
+    brace_depth = 0
+    i = 0
+    while i < len(ref):
+        char = ref[i]
+        if char == "'":
+            if quote and i + 1 < len(ref) and ref[i + 1] == "'":
+                buf.extend([char, ref[i + 1]])
+                i += 2
+                continue
+            quote = not quote
+            buf.append(char)
+        elif not quote:
+            if char == "[":
+                bracket_depth += 1
+                buf.append(char)
+            elif char == "]":
+                if bracket_depth > 0:
+                    bracket_depth -= 1
+                buf.append(char)
+            elif char == "(":
+                paren_depth += 1
+                buf.append(char)
+            elif char == ")":
+                if paren_depth > 0:
+                    paren_depth -= 1
+                buf.append(char)
+            elif char == "{":
+                brace_depth += 1
+                buf.append(char)
+            elif char == "}":
+                if brace_depth > 0:
+                    brace_depth -= 1
+                buf.append(char)
+            elif (
+                char == " "
+                and bracket_depth == 0
+                and paren_depth == 0
+                and brace_depth == 0
+            ):
+                if buf and buf[-1] != " ":
+                    parts.append("".join(buf).strip())
+                    buf = []
+                while i + 1 < len(ref) and ref[i + 1] == " ":
+                    i += 1
+            else:
+                buf.append(char)
+        else:
+            buf.append(char)
+        i += 1
+
+    final = "".join(buf).strip()
+    if final:
+        parts.append(final)
+    return parts if len(parts) > 1 else [ref.strip()]
+
+
 def _unquote_sheet_prefix(prefix: str) -> tuple[str, bool]:
     if len(prefix) >= 2 and prefix[0] == "'" and prefix[-1] == "'":
         return prefix[1:-1].replace("''", "'"), True
@@ -158,12 +284,15 @@ def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
         return {
             "reference_scope": "current_sheet",
             "sheet_name": None,
+            "sheet_range_start": None,
+            "sheet_range_end": None,
             "sheet_quoted": False,
             "workbook_name": None,
             "workbook_path": None,
             "has_sheet": False,
             "has_workbook": False,
             "is_external": False,
+            "is_3d_reference": False,
         }
 
     raw_prefix, quoted = _unquote_sheet_prefix(prefix)
@@ -179,15 +308,43 @@ def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
             workbook_name = raw_prefix[open_idx + 1:close_idx] or None
             sheet_name = raw_prefix[close_idx + 1:] or None
 
+    sheet_range_start = None
+    sheet_range_end = None
+    is_3d_reference = False
+    if sheet_name and ":" in sheet_name:
+        sheet_range_start, sheet_range_end = sheet_name.split(":", 1)
+        is_3d_reference = True
+
     return {
         "reference_scope": "external_workbook" if workbook_name else "other_sheet",
         "sheet_name": sheet_name,
+        "sheet_range_start": sheet_range_start,
+        "sheet_range_end": sheet_range_end,
         "sheet_quoted": quoted,
         "workbook_name": workbook_name,
         "workbook_path": workbook_path,
         "has_sheet": True,
         "has_workbook": workbook_name is not None,
         "is_external": workbook_name is not None,
+        "is_3d_reference": is_3d_reference,
+    }
+
+
+def _parse_table_reference(area: str) -> dict[str, Any] | None:
+    match = _TABLE_REF_RE_FULL.match(area)
+    if not match:
+        return None
+
+    selectors = match.group("selectors")
+    raw_items = [item.strip() for item in re.findall(r"\[([^\[\]]+)\]", selectors) if item.strip()]
+
+    table_selectors = [item for item in raw_items if item.startswith("#")]
+    column_refs = [item for item in raw_items if not item.startswith("#")]
+    return {
+        "table_name": match.group("table"),
+        "table_selectors": table_selectors,
+        "table_columns": column_refs,
+        "is_table_reference": True,
     }
 
 
@@ -244,8 +401,59 @@ def parse_reference(ref: str) -> dict[str, Any]:
 
     Named ranges are returned as class "named_range".
     """
+    ref = ref.strip()
+    union_parts = _split_top_level(ref, {","})
+    if len(union_parts) > 1:
+        operands = [parse_reference(part) for part in union_parts]
+        return {
+            "reference_class": "union",
+            "normalized_ref": ref,
+            "reference_operator": "union",
+            "operands": operands,
+            "reference_scope": "mixed",
+            "is_external": any(item.get("is_external") for item in operands),
+            "is_3d_reference": any(item.get("is_3d_reference") for item in operands),
+            "is_table_reference": any(item.get("is_table_reference") for item in operands),
+        }
+
+    intersection_parts = _split_top_level_intersection(ref)
+    if len(intersection_parts) > 1:
+        operands = [parse_reference(part) for part in intersection_parts]
+        return {
+            "reference_class": "intersection",
+            "normalized_ref": ref,
+            "reference_operator": "intersection",
+            "operands": operands,
+            "reference_scope": "mixed",
+            "is_external": any(item.get("is_external") for item in operands),
+            "is_3d_reference": any(item.get("is_3d_reference") for item in operands),
+            "is_table_reference": any(item.get("is_table_reference") for item in operands),
+        }
+
     prefix, area = _split_ref_prefix(ref)
     sheet_meta = _parse_sheet_prefix(prefix)
+    spill_anchor = None
+    is_spill_reference = area.endswith("#")
+    if is_spill_reference:
+        spill_anchor = area[:-1]
+        area = spill_anchor
+
+    table_meta = _parse_table_reference(area)
+    if table_meta:
+        result = {
+            "reference_class": "table_reference",
+            "normalized_ref": ref,
+            "reference_operator": None,
+            "reference_parts": {"value": {"part_kind": "table", "text": area}},
+            "is_spill_reference": is_spill_reference,
+            "spill_anchor": spill_anchor,
+            **sheet_meta,
+            **table_meta,
+        }
+        if is_spill_reference:
+            result["reference_class"] = "spill_reference"
+            result["spill_source"] = parse_reference(f"{prefix}!{spill_anchor}" if prefix else spill_anchor)
+        return result
 
     if ":" in area:
         start_text, end_text = area.split(":", 1)
@@ -263,24 +471,36 @@ def parse_reference(ref: str) -> dict[str, Any]:
             return {
                 "reference_class": ref_class,
                 "normalized_ref": ref,
+                "reference_operator": "range",
                 "reference_parts": {"start": start, "end": end},
+                "is_spill_reference": is_spill_reference,
+                "spill_anchor": spill_anchor,
+                "is_table_reference": False,
                 **sheet_meta,
             }
     else:
         part = _parse_ref_part(area)
         if part and part["part_kind"] == "cell":
             return {
-                "reference_class": "cell",
+                "reference_class": "spill_reference" if is_spill_reference else "cell",
                 "normalized_ref": ref,
+                "reference_operator": None,
                 "reference_parts": {"value": part},
+                "is_spill_reference": is_spill_reference,
+                "spill_anchor": spill_anchor,
+                "is_table_reference": False,
                 **sheet_meta,
             }
 
     return {
         "reference_class": "named_range",
         "normalized_ref": ref,
+        "reference_operator": None,
         "reference_parts": {"value": {"part_kind": "name", "text": area}},
         "reference_scope": "current_sheet" if prefix is None else sheet_meta["reference_scope"],
+        "is_spill_reference": is_spill_reference,
+        "spill_anchor": spill_anchor,
+        "is_table_reference": False,
         **sheet_meta,
     }
 
@@ -347,7 +567,7 @@ class _Parser:
         return left
 
     def _unary(self):
-        if self.at_op("+", "-"):
+        if self.at_op("+", "-", "@"):
             op = self.consume()[1]
             return _UnaryOp(op, self._unary())
         return self._primary()
@@ -395,7 +615,24 @@ class _Parser:
             self.consume("RPAREN")
             return node
 
+        if kind == "LBRACE":
+            return self._array_constant()
+
         raise SyntaxError(f"Unexpected token: {tok!r}")
+
+    def _array_constant(self):
+        self.consume("LBRACE")
+        rows: list[list[Any]] = [[]]
+        if self.peek() and self.peek()[0] != "RBRACE":
+            rows[-1].append(self._comparison())
+            while self.peek() and self.peek()[0] != "RBRACE":
+                tok = self.consume("COMMA")
+                if tok[1] == ";":
+                    rows.append([self._comparison()])
+                else:
+                    rows[-1].append(self._comparison())
+        self.consume("RBRACE")
+        return _ArrayConstant(rows)
 
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
@@ -403,6 +640,8 @@ def _children(node) -> list:
     if isinstance(node, _FunctionCall): return node.args
     if isinstance(node, _BinaryOp):    return [node.left, node.right]
     if isinstance(node, _UnaryOp):     return [node.expr]
+    if isinstance(node, _ArrayConstant):
+        return [item for row in node.rows for item in row]
     return []
 
 def _add_node(G: nx.DiGraph, node, parent_id=None, arg_index=None) -> str:
@@ -423,6 +662,13 @@ def _add_node(G: nx.DiGraph, node, parent_id=None, arg_index=None) -> str:
         attrs.update(type="Reference", ref=node.ref,
                      **parse_reference(node.ref),
                      label=f'Reference("{node.ref}")')
+    elif isinstance(node, _ArrayConstant):
+        attrs.update(
+            type="ArrayConstant",
+            rows=len(node.rows),
+            cols=max((len(row) for row in node.rows), default=0),
+            label=f"ArrayConstant({len(node.rows)}x{max((len(row) for row in node.rows), default=0)})",
+        )
     elif isinstance(node, _Number):
         attrs.update(type="Number", value=node.value,
                      label=f"Number({node.value})")
@@ -463,8 +709,10 @@ def parse_formula(formula: str) -> nx.DiGraph:
         Edge attributes: arg_index (0-based child position).
         Graph attribute: root_id (UUIDv4 of the root node).
     """
-    tokens = _tokenize(formula)
+    src, meta = _split_formula_wrapper(formula)
+    tokens = _tokenize(src)
     ast = _Parser(tokens).parse()
     G = nx.DiGraph()
     G.graph["root_id"] = _add_node(G, ast)
+    G.graph.update(meta)
     return G

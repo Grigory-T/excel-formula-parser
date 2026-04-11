@@ -221,10 +221,23 @@ This example shows all information produced during formula parsing:
 - full columns like `A:E`, `$A:$E`
 - full rows like `1:10`
 - same-sheet and other-sheet refs
+- 3D sheet refs like `Sheet1:Sheet3!A1:B2`
 - quoted sheet names
 - Cyrillic and Latin sheet names
 - external workbook refs such as `'[Book.xlsx]Sheet1'!A1`
 - full-path workbook refs such as `'C:\path\[Book.xlsx]Sheet1'!A1`
+- table refs such as `Table1[Amount]` and `Table1[[#All],[Amount]]`
+- spill refs such as `A1#`
+- unions like `A1:B2,C3:D4`
+- intersections like `A1:B3 C2:D4`
+
+`parse_formula()` also handles:
+
+- normal formulas like `=SUM(A1,B1*2)`
+- array formula wrappers like `{=SUM(A1:A3*B1:B3)}`
+- array constants like `=SUM({1,2;3,4})`
+- implicit intersection operator like `@Table1[Amount]`
+- newer dynamic-array-style refs that use spill syntax like `A1#`
 
 ## Layout
 
