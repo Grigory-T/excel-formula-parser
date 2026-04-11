@@ -2,6 +2,10 @@
 
 Small Python library for parsing Excel formulas into a NetworkX tree.
 
+This package is optimized for OOXML-style reference strings produced by
+`ClosedXML.Parser` and the companion repo
+`/home/linuxuser/excel_formulas_csharp`.
+
 ## API
 
 ```python
@@ -216,6 +220,7 @@ This example shows all information produced during formula parsing:
 
 `parse_reference()` handles:
 
+- OOXML external workbook index refs like `[1]Sheet1!A1` and `[1]Name`
 - single cells like `A1`, `$B$2`
 - cell ranges like `A1:C3`
 - full columns like `A:E`, `$A:$E`

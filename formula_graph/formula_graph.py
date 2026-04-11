@@ -314,6 +314,7 @@ def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
     raw_prefix, quoted = _unquote_sheet_prefix(prefix)
     workbook_name = None
     workbook_path = None
+    workbook_index = None
     sheet_name = raw_prefix
 
     if "[" in raw_prefix and "]" in raw_prefix:
@@ -321,7 +322,11 @@ def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
         close_idx = raw_prefix.find("]", open_idx + 1)
         if close_idx != -1:
             workbook_path = raw_prefix[:open_idx] or None
-            workbook_name = raw_prefix[open_idx + 1:close_idx] or None
+            workbook_token = raw_prefix[open_idx + 1:close_idx] or None
+            if workbook_token and workbook_token.isdigit():
+                workbook_index = int(workbook_token)
+            else:
+                workbook_name = workbook_token
             sheet_name = raw_prefix[close_idx + 1:] or None
 
     sheet_range_start = None
@@ -338,10 +343,11 @@ def _parse_sheet_prefix(prefix: str | None) -> dict[str, Any]:
         "sheet_range_end": sheet_range_end,
         "sheet_quoted": quoted,
         "workbook_name": workbook_name,
+        "workbook_index": workbook_index,
         "workbook_path": workbook_path,
         "has_sheet": True,
-        "has_workbook": workbook_name is not None,
-        "is_external": workbook_name is not None,
+        "has_workbook": workbook_name is not None or workbook_index is not None,
+        "is_external": workbook_name is not None or workbook_index is not None,
         "is_3d_reference": is_3d_reference,
     }
 
@@ -372,6 +378,7 @@ def _empty_scope_meta() -> dict[str, Any]:
         "sheet_range_end": None,
         "sheet_quoted": False,
         "workbook_name": None,
+        "workbook_index": None,
         "workbook_path": None,
         "has_sheet": False,
         "has_workbook": False,
@@ -381,9 +388,8 @@ def _empty_scope_meta() -> dict[str, Any]:
 
 
 def _parse_external_name_reference(ref: str) -> dict[str, Any] | None:
-    if not (len(ref) >= 2 and ref[0] == "'" and ref[-1] == "'"):
-        return None
-    raw, quoted = _unquote_sheet_prefix(ref)
+    quoted = len(ref) >= 2 and ref[0] == "'" and ref[-1] == "'"
+    raw = _unquote_sheet_prefix(ref)[0] if quoted else ref
     if "[" not in raw or "]" not in raw:
         return None
     open_idx = raw.find("[")
@@ -391,10 +397,43 @@ def _parse_external_name_reference(ref: str) -> dict[str, Any] | None:
     if close_idx == -1:
         return None
     workbook_path = raw[:open_idx] or None
-    workbook_name = raw[open_idx + 1:close_idx] or None
+    workbook_token = raw[open_idx + 1:close_idx] or None
     defined_name = raw[close_idx + 1:] or None
-    if not workbook_name or not defined_name:
+    if not workbook_token or not defined_name:
         return None
+    if "!" in defined_name:
+        return None
+    workbook_name = None
+    workbook_index = None
+    if workbook_token.isdigit():
+        workbook_index = int(workbook_token)
+    else:
+        workbook_name = workbook_token
+
+    table_meta = _parse_table_reference(defined_name)
+    if table_meta is not None:
+        return {
+            "reference_class": "table_reference",
+            "normalized_ref": ref,
+            "reference_operator": None,
+            "reference_parts": {"value": {"part_kind": "table", "text": defined_name}},
+            "is_spill_reference": False,
+            "spill_anchor": None,
+            "reference_scope": "external_workbook",
+            "sheet_name": None,
+            "sheet_range_start": None,
+            "sheet_range_end": None,
+            "sheet_quoted": quoted,
+            "workbook_name": workbook_name,
+            "workbook_index": workbook_index,
+            "workbook_path": workbook_path,
+            "has_sheet": False,
+            "has_workbook": True,
+            "is_external": True,
+            "is_3d_reference": False,
+            **table_meta,
+        }
+
     return {
         "reference_class": "named_range",
         "normalized_ref": ref,
@@ -409,6 +448,7 @@ def _parse_external_name_reference(ref: str) -> dict[str, Any] | None:
         "sheet_range_end": None,
         "sheet_quoted": quoted,
         "workbook_name": workbook_name,
+        "workbook_index": workbook_index,
         "workbook_path": workbook_path,
         "has_sheet": False,
         "has_workbook": True,
