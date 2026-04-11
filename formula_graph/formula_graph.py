@@ -83,7 +83,7 @@ _SHEET_PREFIX = rf"(?:(?:{_QUOTED_SHEET}|{_UNQUOTED_SHEET})!)"
 _CELL_REF = r"\$?[A-Za-z]{1,3}\$?\d+"
 _COLUMN_REF = r"\$?[A-Za-z]{1,3}"
 _ROW_REF = r"\$?\d+"
-_STRUCTURED_REF = r"(?:[^\W\d][\w.]*)?(?:\[(?:[^\[\]]+|\[[^\[\]]+\])+\])+"
+_STRUCTURED_REF = r"(?:[^\W\d][\w.]*)?(?:\[(?:[^\[\]]*|\[[^\[\]]*\])*\])+"
 _AREA_REF = (
     rf"(?:{_CELL_REF}(?::{_CELL_REF})?"
     rf"|{_COLUMN_REF}:{_COLUMN_REF}"
@@ -144,7 +144,23 @@ def _split_formula_wrapper(formula: str) -> tuple[str, dict[str, Any]]:
 _CELL_PART_RE = re.compile(r"^(?P<abs_col>\$?)(?P<col>[A-Za-z]{1,3})(?P<abs_row>\$?)(?P<row>\d+)$")
 _COLUMN_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<col>[A-Za-z]{1,3})$")
 _ROW_PART_RE = re.compile(r"^(?P<abs>\$?)(?P<row>\d+)$")
-_TABLE_REF_RE_FULL = re.compile(r"^(?P<table>[^\W\d][\w.]*)?(?P<selectors>(?:\[(?:[^\[\]]+|\[[^\[\]]+\])+\])+)$")
+_TABLE_REF_RE_FULL = re.compile(r"^(?P<table>[^\W\d][\w.]*)?(?P<selectors>(?:\[(?:[^\[\]]*|\[[^\[\]]*\])*\])+)$")
+_ERROR_REF_VALUES = {
+    "#REF!",
+    "#VALUE!",
+    "#NAME?",
+    "#N/A",
+    "#NUM!",
+    "#NULL!",
+    "#DIV/0!",
+    "#SPILL!",
+    "#CALC!",
+    "#FIELD!",
+    "#BLOCKED!",
+    "#UNKNOWN!",
+    "#CONNECT!",
+    "#GETTING_DATA",
+}
 
 
 def _col_to_index(col: str) -> int:
@@ -348,6 +364,59 @@ def _parse_table_reference(area: str) -> dict[str, Any] | None:
     }
 
 
+def _empty_scope_meta() -> dict[str, Any]:
+    return {
+        "reference_scope": "current_sheet",
+        "sheet_name": None,
+        "sheet_range_start": None,
+        "sheet_range_end": None,
+        "sheet_quoted": False,
+        "workbook_name": None,
+        "workbook_path": None,
+        "has_sheet": False,
+        "has_workbook": False,
+        "is_external": False,
+        "is_3d_reference": False,
+    }
+
+
+def _parse_external_name_reference(ref: str) -> dict[str, Any] | None:
+    if not (len(ref) >= 2 and ref[0] == "'" and ref[-1] == "'"):
+        return None
+    raw, quoted = _unquote_sheet_prefix(ref)
+    if "[" not in raw or "]" not in raw:
+        return None
+    open_idx = raw.find("[")
+    close_idx = raw.find("]", open_idx + 1)
+    if close_idx == -1:
+        return None
+    workbook_path = raw[:open_idx] or None
+    workbook_name = raw[open_idx + 1:close_idx] or None
+    defined_name = raw[close_idx + 1:] or None
+    if not workbook_name or not defined_name:
+        return None
+    return {
+        "reference_class": "named_range",
+        "normalized_ref": ref,
+        "reference_operator": None,
+        "reference_parts": {"value": {"part_kind": "name", "text": defined_name}},
+        "is_spill_reference": False,
+        "spill_anchor": None,
+        "is_table_reference": False,
+        "reference_scope": "external_workbook",
+        "sheet_name": None,
+        "sheet_range_start": None,
+        "sheet_range_end": None,
+        "sheet_quoted": quoted,
+        "workbook_name": workbook_name,
+        "workbook_path": workbook_path,
+        "has_sheet": False,
+        "has_workbook": True,
+        "is_external": True,
+        "is_3d_reference": False,
+    }
+
+
 def _parse_ref_part(part: str) -> dict[str, Any] | None:
     match = _CELL_PART_RE.match(part)
     if match:
@@ -402,10 +471,37 @@ def parse_reference(ref: str) -> dict[str, Any]:
     Named ranges are returned as class "named_range".
     """
     ref = ref.strip()
+    implicit_intersection = ref.startswith("@")
+    if implicit_intersection:
+        ref = ref[1:].strip()
+
+    if ref.upper() in _ERROR_REF_VALUES:
+        result = {
+            "reference_class": "error_reference",
+            "normalized_ref": ref,
+            "reference_operator": None,
+            "reference_parts": {"value": {"part_kind": "error", "text": ref}},
+            "is_spill_reference": False,
+            "spill_anchor": None,
+            "is_table_reference": False,
+            **_empty_scope_meta(),
+        }
+        result["implicit_intersection"] = implicit_intersection
+        return result
+
+    external_name = _parse_external_name_reference(ref)
+    if external_name is not None:
+        external_name["implicit_intersection"] = implicit_intersection
+        return external_name
+
+    bang_reference = ref.startswith("!")
+    if bang_reference:
+        ref = ref[1:]
+
     union_parts = _split_top_level(ref, {","})
     if len(union_parts) > 1:
         operands = [parse_reference(part) for part in union_parts]
-        return {
+        result = {
             "reference_class": "union",
             "normalized_ref": ref,
             "reference_operator": "union",
@@ -415,11 +511,13 @@ def parse_reference(ref: str) -> dict[str, Any]:
             "is_3d_reference": any(item.get("is_3d_reference") for item in operands),
             "is_table_reference": any(item.get("is_table_reference") for item in operands),
         }
+        result["implicit_intersection"] = implicit_intersection
+        return result
 
     intersection_parts = _split_top_level_intersection(ref)
     if len(intersection_parts) > 1:
         operands = [parse_reference(part) for part in intersection_parts]
-        return {
+        result = {
             "reference_class": "intersection",
             "normalized_ref": ref,
             "reference_operator": "intersection",
@@ -429,9 +527,13 @@ def parse_reference(ref: str) -> dict[str, Any]:
             "is_3d_reference": any(item.get("is_3d_reference") for item in operands),
             "is_table_reference": any(item.get("is_table_reference") for item in operands),
         }
+        result["implicit_intersection"] = implicit_intersection
+        return result
 
     prefix, area = _split_ref_prefix(ref)
     sheet_meta = _parse_sheet_prefix(prefix)
+    if bang_reference:
+        sheet_meta = {**sheet_meta, **_empty_scope_meta(), "reference_scope": "bang_reference"}
     spill_anchor = None
     is_spill_reference = area.endswith("#")
     if is_spill_reference:
@@ -453,6 +555,7 @@ def parse_reference(ref: str) -> dict[str, Any]:
         if is_spill_reference:
             result["reference_class"] = "spill_reference"
             result["spill_source"] = parse_reference(f"{prefix}!{spill_anchor}" if prefix else spill_anchor)
+        result["implicit_intersection"] = implicit_intersection
         return result
 
     if ":" in area:
@@ -476,6 +579,7 @@ def parse_reference(ref: str) -> dict[str, Any]:
                 "is_spill_reference": is_spill_reference,
                 "spill_anchor": spill_anchor,
                 "is_table_reference": False,
+                "implicit_intersection": implicit_intersection,
                 **sheet_meta,
             }
     else:
@@ -489,6 +593,7 @@ def parse_reference(ref: str) -> dict[str, Any]:
                 "is_spill_reference": is_spill_reference,
                 "spill_anchor": spill_anchor,
                 "is_table_reference": False,
+                "implicit_intersection": implicit_intersection,
                 **sheet_meta,
             }
 
@@ -501,6 +606,7 @@ def parse_reference(ref: str) -> dict[str, Any]:
         "is_spill_reference": is_spill_reference,
         "spill_anchor": spill_anchor,
         "is_table_reference": False,
+        "implicit_intersection": implicit_intersection,
         **sheet_meta,
     }
 
